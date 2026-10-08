@@ -1,0 +1,8 @@
+.terraform/
+*.tfstate*
+terraform.tfvars
+*.pem
+*.key
+simulator/certs/
+lambdas/**/build/
+*.zip

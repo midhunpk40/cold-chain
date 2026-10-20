@@ -1,0 +1,8 @@
+{
+  "device_id": "sensor-01",
+  "shipment_id": "SHP-1001",
+  "temperature_c": 5.2,
+  "humidity_pct": 45,
+  "battery_pct": 91,
+  "timestamp": "2026-10-20T08:00:00Z"
+}

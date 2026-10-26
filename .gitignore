@@ -6,3 +6,5 @@ terraform.tfvars
 simulator/certs/
 lambdas/**/build/
 *.zip
+.venv/
+__pycache__/

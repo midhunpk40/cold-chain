@@ -20,10 +20,32 @@ resource "aws_cloudwatch_log_group" "ingest" {
 }
 
 data "aws_iam_policy_document" "ingest" {
+  # raw copy + quarantine of bad messages
   statement {
-    sid       = "WriteRawTelemetry"
+    sid       = "WriteRawAndRejected"
     actions   = ["s3:PutObject"]
-    resources = ["${aws_s3_bucket.raw.arn}/raw/*"]
+    resources = ["${aws_s3_bucket.raw.arn}/raw/*", "${aws_s3_bucket.raw.arn}/rejected/*"]
+  }
+
+  # read-only: check shipment exists and belongs to this device
+  statement {
+    sid       = "ReadShipments"
+    actions   = ["dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.shipments.arn]
+  }
+
+  # write-only: store readings (conditional PutItem = dedupe)
+  statement {
+    sid       = "WriteReadings"
+    actions   = ["dynamodb:PutItem"]
+    resources = [aws_dynamodb_table.readings.arn]
+  }
+
+  # read + update device state, nothing else
+  statement {
+    sid       = "SensorState"
+    actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.sensor_state.arn]
   }
 
   statement {
@@ -38,6 +60,7 @@ resource "aws_iam_role_policy" "ingest" {
   role   = aws_iam_role.ingest.id
   policy = data.aws_iam_policy_document.ingest.json
 }
+
 data "archive_file" "ingest" {
   type        = "zip"
   source_dir  = "${path.module}/../lambdas/ingest"
@@ -52,11 +75,15 @@ resource "aws_lambda_function" "ingest" {
   filename         = data.archive_file.ingest.output_path
   source_code_hash = data.archive_file.ingest.output_base64sha256
   timeout          = 10
-  memory_size      = 128
+  memory_size      = 256 # more memory = more CPU = faster start with boto3
 
   environment {
     variables = {
-      RAW_BUCKET = aws_s3_bucket.raw.id
+      RAW_BUCKET      = aws_s3_bucket.raw.id
+      READINGS_TABLE  = aws_dynamodb_table.readings.name
+      STATE_TABLE     = aws_dynamodb_table.sensor_state.name
+      SHIPMENTS_TABLE = aws_dynamodb_table.shipments.name
+      RETENTION_DAYS  = "30"
     }
   }
 

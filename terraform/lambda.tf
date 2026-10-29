@@ -20,32 +20,50 @@ resource "aws_cloudwatch_log_group" "ingest" {
 }
 
 data "aws_iam_policy_document" "ingest" {
-  # raw copy + quarantine of bad messages
+  # raw copy, quarantine of bad messages, excursion evidence
   statement {
-    sid       = "WriteRawAndRejected"
-    actions   = ["s3:PutObject"]
-    resources = ["${aws_s3_bucket.raw.arn}/raw/*", "${aws_s3_bucket.raw.arn}/rejected/*"]
+    sid     = "WriteBucketObjects"
+    actions = ["s3:PutObject"]
+    resources = [
+      "${aws_s3_bucket.raw.arn}/raw/*",
+      "${aws_s3_bucket.raw.arn}/rejected/*",
+      "${aws_s3_bucket.raw.arn}/evidence/*",
+    ]
   }
 
-  # read-only: check shipment exists and belongs to this device
+  # read-only: shipment exists and belongs to this device
   statement {
     sid       = "ReadShipments"
     actions   = ["dynamodb:GetItem"]
     resources = [aws_dynamodb_table.shipments.arn]
   }
 
-  # write-only: store readings (conditional PutItem = dedupe)
+  # read-only: product limits
   statement {
-    sid       = "WriteReadings"
-    actions   = ["dynamodb:PutItem"]
+    sid       = "ReadProducts"
+    actions   = ["dynamodb:GetItem"]
+    resources = [aws_dynamodb_table.products.arn]
+  }
+
+  # PutItem = store reading (dedupe), Query = fetch readings for evidence
+  statement {
+    sid       = "Readings"
+    actions   = ["dynamodb:PutItem", "dynamodb:Query"]
     resources = [aws_dynamodb_table.readings.arn]
   }
 
-  # read + update device state, nothing else
+  # device state and streak counters
   statement {
     sid       = "SensorState"
     actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
     resources = [aws_dynamodb_table.sensor_state.arn]
+  }
+
+  # create, read and update excursion records (no delete)
+  statement {
+    sid       = "Excursions"
+    actions   = ["dynamodb:PutItem", "dynamodb:GetItem", "dynamodb:UpdateItem"]
+    resources = [aws_dynamodb_table.excursions.arn]
   }
 
   statement {
@@ -79,11 +97,13 @@ resource "aws_lambda_function" "ingest" {
 
   environment {
     variables = {
-      RAW_BUCKET      = aws_s3_bucket.raw.id
-      READINGS_TABLE  = aws_dynamodb_table.readings.name
-      STATE_TABLE     = aws_dynamodb_table.sensor_state.name
-      SHIPMENTS_TABLE = aws_dynamodb_table.shipments.name
-      RETENTION_DAYS  = "30"
+      RAW_BUCKET       = aws_s3_bucket.raw.id
+      READINGS_TABLE   = aws_dynamodb_table.readings.name
+      STATE_TABLE      = aws_dynamodb_table.sensor_state.name
+      SHIPMENTS_TABLE  = aws_dynamodb_table.shipments.name
+      PRODUCTS_TABLE   = aws_dynamodb_table.products.name
+      EXCURSIONS_TABLE = aws_dynamodb_table.excursions.name
+      RETENTION_DAYS   = "30"
     }
   }
 

@@ -38,11 +38,14 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "raw" {
 resource "aws_s3_bucket_lifecycle_configuration" "raw" {
   bucket = aws_s3_bucket.raw.id
 
+  # bulk telemetry: short life, saves cost
   rule {
-    id     = "expire-raw-telemetry"
+    id     = "expire-raw"
     status = "Enabled"
 
-    filter {}
+    filter {
+      prefix = "raw/"
+    }
 
     expiration {
       days = 30
@@ -50,6 +53,49 @@ resource "aws_s3_bucket_lifecycle_configuration" "raw" {
 
     noncurrent_version_expiration {
       noncurrent_days = 7
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+
+  rule {
+    id     = "expire-rejected"
+    status = "Enabled"
+
+    filter {
+      prefix = "rejected/"
+    }
+
+    expiration {
+      days = 30
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 7
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+
+  # audit evidence: kept much longer than telemetry
+  rule {
+    id     = "expire-evidence"
+    status = "Enabled"
+
+    filter {
+      prefix = "evidence/"
+    }
+
+    expiration {
+      days = 365
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 90
     }
 
     abort_incomplete_multipart_upload {

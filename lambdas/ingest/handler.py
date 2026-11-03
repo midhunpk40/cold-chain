@@ -19,6 +19,8 @@ state = ddb.Table(os.environ["STATE_TABLE"])
 shipments = ddb.Table(os.environ["SHIPMENTS_TABLE"])
 products = ddb.Table(os.environ["PRODUCTS_TABLE"])
 excursions = ddb.Table(os.environ["EXCURSIONS_TABLE"])
+events = boto3.client("events")
+EVENT_BUS = os.environ["EVENT_BUS"]
 RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "30"))
 
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -37,6 +39,24 @@ def jsonable(o):
 def log(name, **fields):
     # one JSON line per event: easy to search, later feeds CloudWatch metrics
     print(json.dumps({"event": name, **fields}, default=jsonable))
+
+
+def emit(detail_type, detail):
+    # announce what happened; never fail the message if the bus is unavailable
+    try:
+        res = events.put_events(Entries=[{
+            "EventBusName": EVENT_BUS,
+            "Source": "coldchain.detector",
+            "DetailType": detail_type,
+            "Detail": json.dumps(detail, default=jsonable),
+        }])
+        if res.get("FailedEntryCount"):
+            log("event_emit_failed", detail_type=detail_type, excursion_id=detail.get("excursion_id"),
+                error=res["Entries"][0].get("ErrorMessage"))
+        else:
+            log("event_emitted", detail_type=detail_type, excursion_id=detail.get("excursion_id"))
+    except Exception as e:
+        log("event_emit_failed", detail_type=detail_type, excursion_id=detail.get("excursion_id"), error=str(e))
 
 
 def iso(d):
@@ -231,6 +251,7 @@ def open_excursion(thing, ship_id, product_id, lim, new_bad, now_s):
         log("evidence_failed", excursion_id=exc_id, error=str(e))
 
     log("excursion_opened", excursion_id=exc_id, shipment=ship_id, thing=thing, violations=kinds)
+    emit("ExcursionOpened", item)
     return exc_id
 
 
@@ -283,6 +304,16 @@ def close_excursion(thing, exc_id, ts_s, now_s):
         log("evidence_failed", excursion_id=exc_id, error=str(e))
 
     log("excursion_recovered", excursion_id=exc_id, thing=thing)
+    emit("ExcursionRecovered", {
+        "excursion_id": exc_id,
+        "shipment_id": exc["shipment_id"],
+        "device_id": thing,
+        "product_id": exc["product_id"],
+        "violations": exc["violations"],
+        "started_at": exc["started_at"],
+        "recovered_at": ts_s,
+        "evidence_prefix": exc["evidence_prefix"],
+    })
     return exc_id
 
 

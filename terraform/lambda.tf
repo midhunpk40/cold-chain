@@ -66,6 +66,13 @@ data "aws_iam_policy_document" "ingest" {
     resources = [aws_dynamodb_table.excursions.arn]
   }
 
+  # publish excursion events to our bus only
+  statement {
+    sid       = "EmitEvents"
+    actions   = ["events:PutEvents"]
+    resources = [aws_cloudwatch_event_bus.main.arn]
+  }
+
   statement {
     sid       = "WriteLogs"
     actions   = ["logs:CreateLogStream", "logs:PutLogEvents"]
@@ -103,6 +110,7 @@ resource "aws_lambda_function" "ingest" {
       SHIPMENTS_TABLE  = aws_dynamodb_table.shipments.name
       PRODUCTS_TABLE   = aws_dynamodb_table.products.name
       EXCURSIONS_TABLE = aws_dynamodb_table.excursions.name
+      EVENT_BUS        = aws_cloudwatch_event_bus.main.name
       RETENTION_DAYS   = "30"
     }
   }

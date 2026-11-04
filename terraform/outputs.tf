@@ -21,3 +21,15 @@ output "escalations_topic_arn" {
 output "actions_function_name" {
   value = aws_lambda_function.actions.function_name
 }
+
+output "api_url" {
+  value = aws_apigatewayv2_api.main.api_endpoint
+}
+
+output "user_pool_id" {
+  value = aws_cognito_user_pool.main.id
+}
+
+output "user_pool_client_id" {
+  value = aws_cognito_user_pool_client.main.id
+}

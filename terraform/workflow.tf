@@ -1,4 +1,12 @@
-# ---------- SNS: where alert emails go ----------
+locals {
+  # timers in seconds become loop counts; the check at count N happens about (N + 1) * poll_seconds in
+  escalate_polls    = max(ceil(var.ack_escalate_seconds / var.poll_seconds) - 1, 0)
+  ack_expire_polls  = max(ceil(var.ack_expire_seconds / var.poll_seconds) - 1, 0)
+  disp_expire_polls = max(ceil(var.disposition_expire_seconds / var.poll_seconds) - 1, 0)
+  escalation_target = var.escalation_email != "" ? var.escalation_email : var.alert_email
+}
+
+# ---------- SNS: where emails go ----------
 resource "aws_sns_topic" "alerts" {
   name = "coldchain-alerts"
 }
@@ -8,6 +16,17 @@ resource "aws_sns_topic_subscription" "email" {
   topic_arn = aws_sns_topic.alerts.arn
   protocol  = "email"
   endpoint  = var.alert_email
+}
+
+# second audience: managers, for overdue incidents
+resource "aws_sns_topic" "escalations" {
+  name = "coldchain-escalations"
+}
+
+resource "aws_sns_topic_subscription" "escalation_email" {
+  topic_arn = aws_sns_topic.escalations.arn
+  protocol  = "email"
+  endpoint  = local.escalation_target
 }
 
 # ---------- role the state machine runs as ----------
@@ -28,17 +47,17 @@ resource "aws_iam_role" "sfn" {
 }
 
 data "aws_iam_policy_document" "sfn" {
-  # send the alert email, to this one topic only
+  # send emails, to these two topics only
   statement {
     sid       = "Notify"
     actions   = ["sns:Publish"]
-    resources = [aws_sns_topic.alerts.arn]
+    resources = [aws_sns_topic.alerts.arn, aws_sns_topic.escalations.arn]
   }
 
-  # claim the excursion so duplicate events do nothing
+  # claim the excursion (UpdateItem) and watch its status (GetItem)
   statement {
-    sid       = "ClaimNotification"
-    actions   = ["dynamodb:UpdateItem"]
+    sid       = "ExcursionRecord"
+    actions   = ["dynamodb:UpdateItem", "dynamodb:GetItem"]
     resources = [aws_dynamodb_table.excursions.arn]
   }
 }
@@ -56,11 +75,11 @@ resource "aws_sfn_state_machine" "excursion" {
   type     = "STANDARD"
 
   definition = jsonencode({
-    Comment = "Excursion opened: claim once, then notify the team"
+    Comment = "Excursion opened: notify, wait for acknowledgement (escalate if late), wait for disposition"
     StartAt = "ClaimNotification"
     States = {
 
-      # first copy of the event wins; a repeat fails the condition
+      # ---- Step 9 part: claim once, then notify ----
       ClaimNotification = {
         Type     = "Task"
         Resource = "arn:aws:states:::dynamodb:updateItem"
@@ -73,9 +92,8 @@ resource "aws_sfn_state_machine" "excursion" {
             ":now" = { "S.$" = "$$.State.EnteredTime" }
           }
         }
-        ResultPath = null # keep the original event as the state input
+        ResultPath = null
         Catch = [{
-          # both spellings listed: the service prefix casing differs between docs
           ErrorEquals = ["DynamoDB.ConditionalCheckFailedException", "DynamoDb.ConditionalCheckFailedException"]
           Next        = "AlreadyHandled"
         }]
@@ -88,7 +106,7 @@ resource "aws_sfn_state_machine" "excursion" {
         Parameters = {
           TopicArn    = aws_sns_topic.alerts.arn
           "Subject.$" = "States.Format('[COLD-CHAIN] Excursion {} on {}', $.detail.excursion_id, $.detail.shipment_id)"
-          "Message.$" = "States.Format('Temperature excursion detected. Excursion: {} | Shipment: {} | Device: {} | Product: {} | Violations: {} | Started at (UTC): {} | Limits: {} | Next step: investigate and record a disposition.', $.detail.excursion_id, $.detail.shipment_id, $.detail.device_id, $.detail.product_id, States.JsonToString($.detail.violations), $.detail.started_at, States.JsonToString($.detail.limits))"
+          "Message.$" = "States.Format('Temperature excursion detected. Excursion: {} | Shipment: {} | Device: {} | Product: {} | Violations: {} | Started at (UTC): {} | Limits: {} | Next step: acknowledge, investigate and record a disposition.', $.detail.excursion_id, $.detail.shipment_id, $.detail.device_id, $.detail.product_id, States.JsonToString($.detail.violations), $.detail.started_at, States.JsonToString($.detail.limits))"
         }
         ResultPath = null
         Retry = [{
@@ -101,7 +119,186 @@ resource "aws_sfn_state_machine" "excursion" {
           ErrorEquals = ["States.ALL"]
           Next        = "NotifyFailed"
         }]
-        End = true
+        Next = "InitAckLoop"
+      }
+
+      # ---- phase A: wait for acknowledgement ----
+      InitAckLoop = {
+        Type = "Pass"
+        Parameters = {
+          "detail.$" = "$.detail"
+          polls      = 0
+        }
+        Next = "WaitForAck"
+      }
+
+      WaitForAck = {
+        Type    = "Wait"
+        Seconds = var.poll_seconds
+        Next    = "GetStatusAck"
+      }
+
+      GetStatusAck = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::dynamodb:getItem"
+        Parameters = {
+          TableName      = aws_dynamodb_table.excursions.name
+          Key            = { excursion_id = { "S.$" = "$.detail.excursion_id" } }
+          ConsistentRead = true
+        }
+        ResultPath = "$.excursion"
+        Next       = "CheckAck"
+      }
+
+      CheckAck = {
+        Type = "Choice"
+        Choices = [
+          {
+            Variable     = "$.excursion.Item.workflow_status.S"
+            StringEquals = "ACKNOWLEDGED"
+            Next         = "InitDispositionLoop"
+          },
+          {
+            Variable     = "$.excursion.Item.workflow_status.S"
+            StringEquals = "CLOSED"
+            Next         = "Done"
+          },
+          {
+            Variable                 = "$.polls"
+            NumericGreaterThanEquals = local.ack_expire_polls
+            Next                     = "AckExpired"
+          },
+          {
+            Variable      = "$.polls"
+            NumericEquals = local.escalate_polls
+            Next          = "EscalateUnacknowledged"
+          }
+        ]
+        Default = "IncrementAck"
+      }
+
+      EscalateUnacknowledged = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::sns:publish"
+        Parameters = {
+          TopicArn    = aws_sns_topic.escalations.arn
+          "Subject.$" = "States.Format('[COLD-CHAIN][ESCALATION] Excursion {} not acknowledged', $.detail.excursion_id)"
+          "Message.$" = "States.Format('Excursion {} on shipment {} is still unacknowledged. Device: {} | Product: {} | Violations: {} | Started at (UTC): {}. Immediate action needed.', $.detail.excursion_id, $.detail.shipment_id, $.detail.device_id, $.detail.product_id, States.JsonToString($.detail.violations), $.detail.started_at)"
+        }
+        ResultPath = null
+        Retry = [{
+          ErrorEquals     = ["States.TaskFailed"]
+          IntervalSeconds = 2
+          MaxAttempts     = 3
+          BackoffRate     = 2
+        }]
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          Next        = "NotifyFailed"
+        }]
+        Next = "IncrementAck"
+      }
+
+      IncrementAck = {
+        Type = "Pass"
+        Parameters = {
+          "detail.$" = "$.detail"
+          "polls.$"  = "States.MathAdd($.polls, 1)"
+        }
+        Next = "WaitForAck"
+      }
+
+      AckExpired = {
+        Type  = "Fail"
+        Error = "AckExpired"
+        Cause = "No acknowledgement before the deadline"
+      }
+
+      # ---- phase B: wait for disposition ----
+      InitDispositionLoop = {
+        Type = "Pass"
+        Parameters = {
+          "detail.$" = "$.detail"
+          polls      = 0
+        }
+        Next = "WaitForDisposition"
+      }
+
+      WaitForDisposition = {
+        Type    = "Wait"
+        Seconds = var.poll_seconds
+        Next    = "GetStatusDisposition"
+      }
+
+      GetStatusDisposition = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::dynamodb:getItem"
+        Parameters = {
+          TableName      = aws_dynamodb_table.excursions.name
+          Key            = { excursion_id = { "S.$" = "$.detail.excursion_id" } }
+          ConsistentRead = true
+        }
+        ResultPath = "$.excursion"
+        Next       = "CheckDisposition"
+      }
+
+      CheckDisposition = {
+        Type = "Choice"
+        Choices = [
+          {
+            Variable     = "$.excursion.Item.workflow_status.S"
+            StringEquals = "CLOSED"
+            Next         = "NotifyClosed"
+          },
+          {
+            Variable                 = "$.polls"
+            NumericGreaterThanEquals = local.disp_expire_polls
+            Next                     = "DispositionExpired"
+          }
+        ]
+        Default = "IncrementDisposition"
+      }
+
+      IncrementDisposition = {
+        Type = "Pass"
+        Parameters = {
+          "detail.$" = "$.detail"
+          "polls.$"  = "States.MathAdd($.polls, 1)"
+        }
+        Next = "WaitForDisposition"
+      }
+
+      NotifyClosed = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::sns:publish"
+        Parameters = {
+          TopicArn    = aws_sns_topic.alerts.arn
+          "Subject.$" = "States.Format('[COLD-CHAIN] Excursion {} CLOSED: {}', $.detail.excursion_id, $.excursion.Item.disposition.S)"
+          "Message.$" = "States.Format('Excursion {} on shipment {} is closed. Disposition: {} | Decided by: {} at (UTC): {} | Note: {} | Acknowledged by: {}.', $.detail.excursion_id, $.detail.shipment_id, $.excursion.Item.disposition.S, $.excursion.Item.disposition_by.S, $.excursion.Item.disposition_at.S, $.excursion.Item.disposition_note.S, $.excursion.Item.acknowledged_by.S)"
+        }
+        ResultPath = null
+        Retry = [{
+          ErrorEquals     = ["States.TaskFailed"]
+          IntervalSeconds = 2
+          MaxAttempts     = 3
+          BackoffRate     = 2
+        }]
+        Catch = [{
+          ErrorEquals = ["States.ALL"]
+          Next        = "NotifyFailed"
+        }]
+        Next = "Done"
+      }
+
+      DispositionExpired = {
+        Type  = "Fail"
+        Error = "DispositionExpired"
+        Cause = "Acknowledged but no disposition before the deadline"
+      }
+
+      # ---- ends ----
+      Done = {
+        Type = "Succeed"
       }
 
       AlreadyHandled = {

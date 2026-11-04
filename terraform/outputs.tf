@@ -13,3 +13,11 @@ output "state_machine_arn" {
 output "alerts_topic_arn" {
   value = aws_sns_topic.alerts.arn
 }
+
+output "escalations_topic_arn" {
+  value = aws_sns_topic.escalations.arn
+}
+
+output "actions_function_name" {
+  value = aws_lambda_function.actions.function_name
+}

@@ -152,6 +152,12 @@ resource "aws_apigatewayv2_route" "routes" {
   authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
 }
 
+# every request that reaches the API, including 401 and 403 rejections
+resource "aws_cloudwatch_log_group" "api_access" {
+  name              = "/aws/apigateway/coldchain-api"
+  retention_in_days = 7
+}
+
 resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.main.id
   name        = "$default"
@@ -161,6 +167,22 @@ resource "aws_apigatewayv2_stage" "default" {
   default_route_settings {
     throttling_burst_limit = 20
     throttling_rate_limit  = 10
+  }
+
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.api_access.arn
+    format = jsonencode({
+      requestId        = "$context.requestId"
+      time             = "$context.requestTime"
+      ip               = "$context.identity.sourceIp"
+      method           = "$context.httpMethod"
+      route            = "$context.routeKey"
+      path             = "$context.path"
+      status           = "$context.status"
+      authorizerError  = "$context.authorizer.error"
+      authorizerClaims = "$context.authorizer.claims.username"
+      responseLength   = "$context.responseLength"
+    })
   }
 }
 

@@ -217,6 +217,7 @@ def open_excursion(thing, ship_id, product_id, lim, new_bad, now_s):
         "violations": kinds or ["unknown"],
         "condition_state": "ACTIVE",    # what the temperature is doing
         "workflow_status": "OPEN",      # what humans did about it
+        "type": "TEMPERATURE",          # vs TELEMETRY_MISSING (watchdog)
         "started_at": streak[-1]["device_ts"],
         "opened_at": now_s,
         "trigger_count": len(streak),
@@ -318,6 +319,67 @@ def close_excursion(thing, exc_id, ts_s, now_s):
 
 
 # ---------------- handler ----------------
+def close_gap(thing, gap_id, now_s):
+    # the device is talking again: the telemetry gap is over
+    exc = excursions.get_item(Key={"excursion_id": gap_id}, ConsistentRead=True).get("Item")
+    if not exc:
+        log("excursion_record_missing", excursion_id=gap_id)
+        return None
+
+    applied = txn([
+        {   # free the gap slot, only if it still holds this gap
+            "Update": {
+                "TableName": state.name,
+                "Key": {"device_id": thing},
+                "UpdateExpression": "REMOVE active_gap_id",
+                "ConditionExpression": "active_gap_id = :id",
+                "ExpressionAttributeValues": {":id": gap_id},
+            }
+        },
+        {   # contact is back; workflow_status stays OPEN until a human decides
+            "Update": {
+                "TableName": excursions.name,
+                "Key": {"excursion_id": gap_id},
+                "UpdateExpression": "SET condition_state = :rec, recovered_at = :ts, recovery_logged_at = :now",
+                "ConditionExpression": "condition_state = :act",
+                "ExpressionAttributeValues": {":rec": "RECOVERED", ":act": "ACTIVE", ":ts": now_s, ":now": now_s},
+            }
+        },
+    ])
+    if not applied:
+        return None
+
+    try:
+        seconds = int((parse_ts(now_s) - parse_ts(exc["started_at"])).total_seconds())
+        excursions.update_item(
+            Key={"excursion_id": gap_id},
+            UpdateExpression="SET gap_seconds = :g",
+            ExpressionAttributeValues={":g": seconds},
+        )
+        put_json(exc["evidence_prefix"] + "closed.json", {
+            "excursion_id": gap_id,
+            "type": "TELEMETRY_MISSING",
+            "last_contact_before_gap": exc["started_at"],
+            "contact_resumed_at": now_s,
+            "gap_seconds": seconds,
+            "note": "temperature is unknown for the whole gap",
+        })
+    except Exception as e:
+        log("evidence_failed", excursion_id=gap_id, error=str(e))
+
+    log("gap_closed", excursion_id=gap_id, thing=thing)
+    emit("ExcursionRecovered", {
+        "excursion_id": gap_id,
+        "type": "TELEMETRY_MISSING",
+        "shipment_id": exc["shipment_id"],
+        "device_id": thing,
+        "product_id": exc["product_id"],
+        "violations": exc["violations"],
+        "started_at": exc["started_at"],
+        "recovered_at": now_s,
+        "evidence_prefix": exc["evidence_prefix"],
+    })
+    return gap_id
 
 def handler(event, context):
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -375,6 +437,10 @@ def handler(event, context):
             log("duplicate", thing=thing, message_id=event["message_id"])
             return {"status": "duplicate"}
         raise  # real error: let Lambda retry, the conditional write makes retry safe
+    
+    gap_id = (st or {}).get("active_gap_id")
+    if gap_id:  # even a late reading proves the device is talking again
+        close_gap(thing, gap_id, now_s)
 
     if late:
         # late readings are history: they never change streaks or device state

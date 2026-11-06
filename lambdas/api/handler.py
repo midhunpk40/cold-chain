@@ -41,10 +41,10 @@ HTTP_FOR = {
     "bad_excursion_id": 400, "bad_actor": 400, "bad_decision": 400, "unknown_action": 400,
     "not_found": 404,
     "not_open": 409, "not_acknowledged": 409, "release_requires_recovery": 409,
-}
+    "release_requires_justification": 409,}
 
 SUMMARY_KEYS = ("excursion_id", "shipment_id", "device_id", "product_id", "violations",
-                "condition_state", "workflow_status", "started_at", "acknowledged_by", "disposition")
+                "condition_state", "workflow_status", "started_at", "acknowledged_by", "disposition","type")
 
 
 class ApiError(Exception):

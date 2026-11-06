@@ -41,3 +41,14 @@ variable "escalation_email" {
   default     = ""
   description = "manager email; empty means reuse alert_email"
 }
+variable "watchdog_enabled" {
+  type        = bool
+  default     = false
+  description = "run the silent-sensor check every minute (keep false while the simulator is idle)"
+}
+
+variable "max_silence_seconds" {
+  type        = number
+  default     = 120
+  description = "a monitored sensor silent for longer than this opens a telemetry gap"
+}

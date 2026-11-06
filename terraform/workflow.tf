@@ -106,8 +106,7 @@ resource "aws_sfn_state_machine" "excursion" {
         Parameters = {
           TopicArn    = aws_sns_topic.alerts.arn
           "Subject.$" = "States.Format('[COLD-CHAIN] Excursion {} on {}', $.detail.excursion_id, $.detail.shipment_id)"
-          "Message.$" = "States.Format('Temperature excursion detected. Excursion: {} | Shipment: {} | Device: {} | Product: {} | Violations: {} | Started at (UTC): {} | Limits: {} | Next step: acknowledge, investigate and record a disposition.', $.detail.excursion_id, $.detail.shipment_id, $.detail.device_id, $.detail.product_id, States.JsonToString($.detail.violations), $.detail.started_at, States.JsonToString($.detail.limits))"
-        }
+        "Message.$" = "States.Format('Cold-chain excursion detected. Type: {} | Excursion: {} | Shipment: {} | Device: {} | Product: {} | Violations: {} | Started at (UTC): {} | Limits: {} | Next step: acknowledge, investigate and record a disposition.', $.detail.type, $.detail.excursion_id, $.detail.shipment_id, $.detail.device_id, $.detail.product_id, States.JsonToString($.detail.violations), $.detail.started_at, States.JsonToString($.detail.limits))" }
         ResultPath = null
         Retry = [{
           ErrorEquals     = ["States.TaskFailed"]

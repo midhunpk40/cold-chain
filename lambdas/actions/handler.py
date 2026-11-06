@@ -97,6 +97,14 @@ def disposition(event):
         return fail("bad_decision", "decision must be RELEASE, QUARANTINE or DESTROY")
     note = clean_note(event.get("note"))
     ts = now_s()
+    if decision == "RELEASE":
+        current = get_exc(exc_id)
+        if current and current.get("type") == "TELEMETRY_MISSING" and len(note) < 20:
+            # temperature was unknown during the gap: release needs a written reason
+            return fail("release_requires_justification",
+                        "temperature was unknown during a telemetry gap: add a note of at least 20 characters "
+                        "explaining why release is safe", excursion_id=exc_id)
+                        
 
     condition = "workflow_status = :ack"  # only an acknowledged excursion can be closed
     values = {

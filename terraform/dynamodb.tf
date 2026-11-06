@@ -1,8 +1,8 @@
 locals {
   # demo shipments: which device rides with which shipment and product
   seed_shipments = {
-    "SHP-1001" = { device = "coldchain-sensor-01", product = "VAC-2-8C", origin = "Mumbai Cold Store", destination = "Kochi Hospital" }
-    "SHP-1002" = { device = "coldchain-sensor-02", product = "INS-2-8C", origin = "Chennai Depot", destination = "Madurai Clinic" }
+    "SHP-1001" = { device = "coldchain-sensor-01", product = "VAC-2-8C", origin = "Mumbai Cold Store", destination = "Kochi Hospital", monitored = true }
+    "SHP-1002" = { device = "coldchain-sensor-02", product = "INS-2-8C", origin = "Chennai Depot", destination = "Madurai Clinic", monitored = false }
   }
 }
 
@@ -76,6 +76,7 @@ resource "aws_dynamodb_table_item" "shipment" {
     origin       = { S = each.value.origin }
     destination  = { S = each.value.destination }
     status       = { S = "IN_TRANSIT" }
+    monitored    = { BOOL = each.value.monitored }
   })
 }
 locals {

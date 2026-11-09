@@ -91,7 +91,6 @@ for o in objs:
 
 text = "\n".join(lines)
 print(text)
-
 out = Path("docs") / "reports"
 out.mkdir(parents=True, exist_ok=True)
 (out / f"{exc_id}.md").write_text(text, encoding="utf-8")
